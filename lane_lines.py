@@ -11,7 +11,7 @@ class Camera:
 		self.dist = None
 		self.good_cal_images = 0
 		self.M = None
-		self.Minv = None
+		self.M_inv = None
 		self.image_size = None
 
 	def calibrate(self, chessboard=(9, 6), folder='camera_cal/', verbose = False):
@@ -73,8 +73,8 @@ class Camera:
 
 	def set_perspective_points(self, src, dst, image):
 		# calculate and save perspective transform matricies
-		self.M = cv2.getPerspectiveTransform(src,dst)
-		self.M_inv = cv2.getPerspectiveTransform(dst,src)
+		self.M = cv2.getPerspectiveTransform(src, dst)
+		self.M_inv = cv2.getPerspectiveTransform(dst, src)
 
 		# Draw source points on unwarped image
 		image1 = self.undistort(image)
@@ -96,11 +96,11 @@ class Camera:
 
 	def unwarp(self, image):
 		""" Unwarp image from bird's eye view to driver's view """
-		return cv2.warpPerspective(image, self.Minv, self.image_size, flags=cv2.INTER_NEAREST)
+		return cv2.warpPerspective(image, self.M_inv, self.image_size, flags=cv2.INTER_NEAREST)
 
 class LaneLines:
-	def __init__(self, image_size, pixels_per_meter=(24, 189), camera):
-		self.image_size = image_size
+	def __init__(self, image_size, camera, pixels_per_meter=(24, 189)):
+		self.image_size = image_size # (width, height)
 		self.pixels_per_meter = pixels_per_meter
 		self.ym_per_pix = 1/pixels_per_meter[0]
 		self.xm_per_pix = 1/pixels_per_meter[1]
@@ -225,7 +225,7 @@ class LaneLines:
 			# If you found > minpix pixels, recenter next window on their mean position
 			if len(good_left_inds) > minpix:
 				leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
-		    if len(good_right_inds) > minpix:        
+			if len(good_right_inds) > minpix:        
 				rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
 
 		# Concatenate the arrays of indices
@@ -259,7 +259,7 @@ class LaneLines:
 		# create image to create mask
 		self.left_mask = np.zeros(self.image_size)
 		self.right_mask = np.zeros(self.image_size)
-		self.ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+		self.ploty = np.linspace(0, self.image_size[1]-1, self.image_size[1])
 		self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
 		self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
 
@@ -282,13 +282,10 @@ class LaneLines:
 		self.right_fit = np.polyfit(self.righty, self.rightx, 2)
 
 	def lane_stats(self):
-		# Define conversions in x and y from pixels space to meters
-		self.ym_per_pix = 30/720 # meters per pixel in y dimension
-		self.xm_per_pix = 3.7/700 # meters per pixel in x dimension
 		y_eval = 720
 		# Fit new polynomials to x,y in world space
-		left_fit_cr = np.polyfit(self.lefty*ym_per_pix, self.leftx*xm_per_pix, 2)
-		right_fit_cr = np.polyfit(self.righty*ym_per_pix, self.rightx*xm_per_pix, 2)
+		left_fit_cr = np.polyfit(self.lefty*self.ym_per_pix, self.leftx*self.xm_per_pix, 2)
+		right_fit_cr = np.polyfit(self.righty*self.ym_per_pix, self.rightx*self.xm_per_pix, 2)
 		# Calculate the new radii of curvature
 		self.left_curverad = ((1 + (2*left_fit_cr[0]*y_eval*self.ym_per_pix + left_fit_cr[1])**2)**1.5) / np.absolute(2*left_fit_cr[0])
 		self.right_curverad = ((1 + (2*right_fit_cr[0]*y_eval*self.ym_per_pix + right_fit_cr[1])**2)**1.5) / np.absolute(2*right_fit_cr[0])
@@ -296,26 +293,26 @@ class LaneLines:
 		left_pos = self.left_fit[0]*y_eval**2 + self.left_fit[1]*y_eval + self.left_fit[2]
 		right_pos = self.right_fit[0]*y_eval**2 + self.right_fit[1]*y_eval + self.right_fit[2]
 		lane_center = (left_pos + right_pos)/2*self.xm_per_pix
-		vehicle_offset = image_size[0]*self.xm_per_pix/2 - lane_center
+		vehicle_offset = self.image_size[0]*self.xm_per_pix/2 - lane_center
 
-	def mark_lane(self, image):
-		image = camera.undistort()
-		image = camera.warp()
-		bin_image = self.binary_image(image)
+	def mark_lane(self, image, testing = True):
+		undistored_image = self.camera.undistort(image)
+		warped = self.camera.warp(undistored_image)
+		binary_warped = self.binary_image(warped)
 		
-		if not self.left_mask | not self.right_mask:
-			self.find_lost_line_points(bin_image)
+		if (not self.left_mask) | (not self.right_mask) or testing:
+			self.find_lost_line_points(binary_warped)
 		else:
-			self.find_line_points(bin_image)
+			self.find_line_points(binary_warped)
 		self.fit_lines()
 		self.line_mask(100)
 		self.lane_stats()
-		
+
 		if max(self.left_curverad, self.right_curverad)/min(self.left_curverad, self.right_curverad) > 10:
 			self.left_max, self.right_mask = None
 
 		# Create an image to draw the lines on
-		warp_zero = np.zeros_like(bin_image).astype(np.uint8)
+		warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
 		color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
 
 		# Recast the x and y points into usable format for cv2.fillPoly()
@@ -327,13 +324,11 @@ class LaneLines:
 		cv2.fillPoly(color_warp, np.int_([pts]), (0,255, 0))
 
 		# Warp the blank back to original image space using inverse perspective matrix (Minv)
-		newwarp = camera.unwarp(color_warp)
+		newwarp = self.camera.unwarp(color_warp)
 		# Combine the result with the original image
 		result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
 		plt.imshow(result)
 		plt.show()
-
-
 
 
 def compare_image(image1, title1, image2, title2, axii='off'):
