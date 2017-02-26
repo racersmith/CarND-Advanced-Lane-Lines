@@ -115,10 +115,28 @@ class LaneLines:
 		self.lefty = None
 		self.rightx = None
 		self.righty = None
+		self.left_points = None
+		self.right_points = None
 		self.left_curverad = None
 		self.right_curverad = None
 		self.vehicle_offset = None
 		self.camera = camera
+
+	def reset_lane(self):
+		self.left_mask = None
+		self.right_mask = None
+		self.left_fit = None
+		self.right_fit = None
+		self.left_fitx = None
+		self.right_fitx = None
+		self.ploty = None
+		self.leftx = None
+		self.lefty = None
+		self.rightx = None
+		self.righty = None
+		self.left_curverad = None
+		self.right_curverad = None
+		self.vehicle_offset = None
 
 	def binary_threshold(self, image, thresh=(0, 255)):
 		"""Convert the image to binary based on the pixle value falling
@@ -223,10 +241,15 @@ class LaneLines:
 			left_lane_inds.append(good_left_inds)
 			right_lane_inds.append(good_right_inds)
 			# If you found > minpix pixels, recenter next window on their mean position
+			# If only one line is found then adjust other line to follow
 			if len(good_left_inds) > minpix:
 				leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+				if len(good_right_inds) < minpix:
+					rightx_current = leftx_current + 700
 			if len(good_right_inds) > minpix:        
 				rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+				if len(good_left_inds) < minpix:
+					leftx_current = rightx_current - 700
 
 		# Concatenate the arrays of indices
 		left_lane_inds = np.concatenate(left_lane_inds)
@@ -240,25 +263,23 @@ class LaneLines:
 
 	def find_line_points(self, binary_warped):
 		# Identify the x and y positions of all nonzero pixels in the image
-		left_points = binary_warped & self.left_mask
+		self.left_points = np.zeros_like(binary_warped)
+		self.left_points[(binary_warped == 1) & (self.left_mask == 1)] = 1
 		
-		nonzero = left_points.nonzero()
-		nonzeroy = np.array(nonzero[0])
-		nonzerox = np.array(nonzero[1])
-		self.leftx = nonzerox[left_lane_inds]
-		self.lefty = nonzeroy[left_lane_inds] 
+		nonzero = self.left_points.nonzero()
+		self.leftx = np.array(nonzero[1])
+		self.lefty = np.array(nonzero[0])
 		
-		right_points = binary_warped & self.right_mask
-		nonzero = right_points.nonzero()
-		nonzeroy = np.array(nonzero[0])
-		nonzerox = np.array(nonzero[1])
-		self.rightx = nonzerox[right_lane_inds]
-		self.righty = nonzeroy[right_lane_inds]
+		self.right_points = np.zeros_like(binary_warped)
+		self.right_points[(binary_warped == 1) & (self.right_mask == 1)] = 1
+		nonzero = self.right_points.nonzero()
+		self.rightx = np.array(nonzero[1])
+		self.righty = np.array(nonzero[0])
 
 	def line_mask(self, margin):
 		# create image to create mask
-		self.left_mask = np.zeros(self.image_size)
-		self.right_mask = np.zeros(self.image_size)
+		self.left_mask = np.zeros((self.image_size[1], self.image_size[0]))
+		self.right_mask = np.zeros((self.image_size[1], self.image_size[0]))
 		self.ploty = np.linspace(0, self.image_size[1]-1, self.image_size[1])
 		self.left_fitx = self.left_fit[0]*self.ploty**2 + self.left_fit[1]*self.ploty + self.left_fit[2]
 		self.right_fitx = self.right_fit[0]*self.ploty**2 + self.right_fit[1]*self.ploty + self.right_fit[2]
@@ -293,23 +314,20 @@ class LaneLines:
 		left_pos = self.left_fit[0]*y_eval**2 + self.left_fit[1]*y_eval + self.left_fit[2]
 		right_pos = self.right_fit[0]*y_eval**2 + self.right_fit[1]*y_eval + self.right_fit[2]
 		lane_center = (left_pos + right_pos)/2*self.xm_per_pix
-		vehicle_offset = self.image_size[0]*self.xm_per_pix/2 - lane_center
+		self.vehicle_offset = self.image_size[0]*self.xm_per_pix/2 - lane_center
 
 	def mark_lane(self, image, testing = True):
 		undistored_image = self.camera.undistort(image)
 		warped = self.camera.warp(undistored_image)
 		binary_warped = self.binary_image(warped)
 		
-		if (not self.left_mask) | (not self.right_mask) or testing:
+		if (not self.left_mask) or (not self.right_mask):
 			self.find_lost_line_points(binary_warped)
 		else:
 			self.find_line_points(binary_warped)
 		self.fit_lines()
 		self.line_mask(100)
 		self.lane_stats()
-
-		if max(self.left_curverad, self.right_curverad)/min(self.left_curverad, self.right_curverad) > 10:
-			self.left_max, self.right_mask = None
 
 		# Create an image to draw the lines on
 		warp_zero = np.zeros_like(binary_warped).astype(np.uint8)
@@ -327,18 +345,26 @@ class LaneLines:
 		newwarp = self.camera.unwarp(color_warp)
 		# Combine the result with the original image
 		result = cv2.addWeighted(image, 1, newwarp, 0.3, 0)
+		cv2.putText(result, "Left Radius%7.0fm" % self.left_curverad, (25, 50), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+		cv2.putText(result, "Right Radius%6.0fm" % self.right_curverad, (25, 75), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
+		cv2.putText(result, "Offset% 12.3fm" % self.vehicle_offset, (25, 100), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
 		plt.imshow(result)
+		plt.axis('off')
 		plt.show()
+
+		# Check if the radii are similar
+		if max(self.left_curverad, self.right_curverad) / min(self.left_curverad, self.right_curverad) > 10:
+			self.reset_lane()
 
 
 def compare_image(image1, title1, image2, title2, axii='off'):
 	""" plot two images side by side for comparison
 	"""
 	fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20,10))
-	ax1.imshow(image1)
+	ax1.imshow(image1, cmap='gray')
 	ax1.set_title(title1, fontsize=30)
 	ax1.axis(axii)
-	ax2.imshow(image2)
+	ax2.imshow(image2, cmap='gray')
 	ax2.set_title(title2, fontsize=30)
 	ax2.axis(axii)
 	plt.show()
