@@ -2,7 +2,10 @@ import numpy as np
 import cv2
 import glob
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import math
+import pickle
+from moviepy.editor import VideoFileClip
 
 class Camera:
 	def __init__(self):
@@ -13,6 +16,8 @@ class Camera:
 		self.M = None
 		self.M_inv = None
 		self.image_size = None
+		self.calibration_file = "camera_calibration.p"
+		self.transform_file = "transform_matrix.p"
 
 	def calibrate(self, chessboard=(9, 6), folder='camera_cal/', verbose = False):
 		# prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(6,5,0)
@@ -62,6 +67,13 @@ class Camera:
 		# Do camera calibration given object points and image points
 		self.image_size = (image.shape[1], image.shape[0])
 		ret, self.mtx, self.dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, self.image_size,None,None)
+		
+		# Save calibration data
+		calibration_pickle = {}
+		calibration_pickle["mtx"] = self.mtx
+		calibration_pickle["dist"] = self.dist
+		pickle.dump(calibration_pickle, open(self.calibration_file, "wb"))
+
 		self.calibrated = True
 
 	def undistort(self, image):
@@ -71,24 +83,43 @@ class Camera:
 		"""
 		return cv2.undistort(image, self.mtx, self.dist, None, self.mtx)
 
-	def set_perspective_points(self, src, dst, image):
+	def set_perspective_points(self, src, dst, images):
 		# calculate and save perspective transform matricies
 		self.M = cv2.getPerspectiveTransform(src, dst)
 		self.M_inv = cv2.getPerspectiveTransform(dst, src)
 
-		# Draw source points on unwarped image
-		image1 = self.undistort(image)
-		src_draw = src.reshape((-1,1,2)).astype(int)
-		cv2.polylines(image1, [src_draw], True, (98, 244, 65), thickness=4)
+		# Save transform data
+		trasform_pickle = {}
+		trasform_pickle["M"] = self.M
+		trasform_pickle["M_inv"] = self.M_inv
+		pickle.dump(trasform_pickle, open(self.transform_file, "wb"))
 
-		# Draw destination points on warped image
-		image2 = self.undistort(image)
-		image2 = self.warp(image2)
-		dst_draw = dst.reshape((-1,1,2)).astype(int)
-		cv2.polylines(image2, [dst_draw], True, (98, 244, 65), thickness=4)
+		for image in images:
+			# Draw source points on unwarped image
+			image1 = self.undistort(image)
+			src_draw = src.reshape((-1,1,2)).astype(int)
+			cv2.polylines(image1, [src_draw], True, (98, 244, 65), thickness=4)
 
-		# Show perspective points
-		compare_image(image1, "Source", image2, "Destination", axii='on')
+			# Draw destination points on warped image
+			image2 = self.undistort(image)
+			image2 = self.warp(image2)
+			dst_draw = dst.reshape((-1,1,2)).astype(int)
+			cv2.polylines(image2, [dst_draw], True, (98, 244, 65), thickness=4)
+
+			# Show perspective points
+			compare_image(image1, "Source", image2, "Destination", axii='on')
+
+	def load_calibration(self):
+		# Load distortion data
+		calibration = pickle.load(open(self.calibration_file, 'rb'))
+		self.mtx = calibration['mtx']
+		self.dist = calibration['dist']
+		
+		# Load perspective data
+		transform_matrix = pickle.load(open(self.transform_file, 'rb'))
+		self.M = transform_matrix['M']
+		self.M_inv = transform_matrix['M_inv']
+		print("Calibration Loaded")
 
 	def warp(self, image):
 		""" Warp image to bird's eye view """
@@ -99,11 +130,11 @@ class Camera:
 		return cv2.warpPerspective(image, self.M_inv, self.image_size, flags=cv2.INTER_NEAREST)
 
 class LaneLines:
-	def __init__(self, image_size, camera, pixels_per_meter=(24, 189)):
+	def __init__(self, image_size, camera, pixels_per_meter=(189.0, 31.0)):
 		self.image_size = image_size # (width, height)
 		self.pixels_per_meter = pixels_per_meter
-		self.ym_per_pix = 1/pixels_per_meter[0]
-		self.xm_per_pix = 1/pixels_per_meter[1]
+		self.xm_per_pix = 1.0/pixels_per_meter[0]
+		self.ym_per_pix = 1.0/pixels_per_meter[1]
 		self.left_mask = None
 		self.right_mask = None
 		self.left_fit = None
@@ -303,7 +334,7 @@ class LaneLines:
 		self.right_fit = np.polyfit(self.righty, self.rightx, 2)
 
 	def lane_stats(self):
-		y_eval = 720
+		y_eval = self.image_size[1]
 		# Fit new polynomials to x,y in world space
 		left_fit_cr = np.polyfit(self.lefty*self.ym_per_pix, self.leftx*self.xm_per_pix, 2)
 		right_fit_cr = np.polyfit(self.righty*self.ym_per_pix, self.rightx*self.xm_per_pix, 2)
@@ -321,12 +352,12 @@ class LaneLines:
 		warped = self.camera.warp(undistored_image)
 		binary_warped = self.binary_image(warped)
 		
-		if (not self.left_mask) or (not self.right_mask):
+		if self.left_mask == None:
 			self.find_lost_line_points(binary_warped)
 		else:
 			self.find_line_points(binary_warped)
 		self.fit_lines()
-		self.line_mask(100)
+		self.line_mask(50)
 		self.lane_stats()
 
 		# Create an image to draw the lines on
@@ -348,14 +379,17 @@ class LaneLines:
 		cv2.putText(result, "Left Radius%7.0fm" % self.left_curverad, (25, 50), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
 		cv2.putText(result, "Right Radius%6.0fm" % self.right_curverad, (25, 75), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
 		cv2.putText(result, "Offset% 12.3fm" % self.vehicle_offset, (25, 100), 0, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
-		plt.imshow(result)
-		plt.axis('off')
-		plt.show()
 
 		# Check if the radii are similar
 		if max(self.left_curverad, self.right_curverad) / min(self.left_curverad, self.right_curverad) > 10:
 			self.reset_lane()
+		return result
 
+	def process_video(self, file_in):
+		self.reset_lane()   # clear the history from last video
+		clip1 = VideoFileClip(file_in)
+		project_clip = clip1.fl_image(self.mark_lane)
+		project_clip.write_videofile('output_videos/processed_'+file_in, audio=False)
 
 def compare_image(image1, title1, image2, title2, axii='off'):
 	""" plot two images side by side for comparison
